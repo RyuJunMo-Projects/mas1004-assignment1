@@ -32,12 +32,33 @@ def predict_logits(model, X, batch_size=64):
     next(model.parameters()).device, and bring the answers back with .cpu().
     Work in batches so that a large test set does not run you out of memory.
     """
-    raise NotImplementedError("Problem 3: fill in predict_logits")
+    X = np.asarray(X, dtype=np.float32)
+
+    # Wherever the model's numbers live: CPU here, GPU on Colab. The rows stay
+    # in ordinary memory and only one batch at a time is copied over.
+    device = next(model.parameters()).device
+
+    # eval mode, or ResNet's BatchNorm layers give different answers each call.
+    model.eval()
+    answers = []
+    with torch.no_grad():
+        for start in range(0, len(X), batch_size):
+            batch = torch.from_numpy(
+                np.ascontiguousarray(X[start:start + batch_size])
+            ).to(device)
+            answers.append(model(batch).cpu().numpy())
+
+    # One (batch, C) block per batch, stacked back into (N, C). Raw outputs: no
+    # softmax here, because the loss during training had none either.
+    return np.concatenate(answers).astype(np.float32)
 
 
 def accuracy(model, X, y):
     """Return the share of rows the model gets right, as a float 0.0 to 1.0."""
-    raise NotImplementedError("Problem 3: fill in accuracy")
+    y = np.asarray(y)
+    # The model's answer for a row is whichever raw output is the biggest.
+    predicted = predict_logits(model, X).argmax(axis=1)
+    return float((predicted == y).mean())
 
 
 def confusion_matrix(model, X, y, num_classes):
@@ -47,7 +68,14 @@ def confusion_matrix(model, X, y, num_classes):
     how many images of class i the model called class j. The diagonal is the
     ones it got right.
     """
-    raise NotImplementedError("Problem 3: fill in confusion_matrix")
+    y = np.asarray(y)
+    predicted = predict_logits(model, X).argmax(axis=1)
+
+    matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
+    # add.at, not matrix[y, predicted] += 1: two rows often share the same
+    # (true, predicted) pair, and plain += would count each pair only once.
+    np.add.at(matrix, (y, predicted), 1)
+    return matrix
 
 
 def worst_examples(model, X, y, paths, k=10):
@@ -66,7 +94,33 @@ def worst_examples(model, X, y, paths, k=10):
     These are the images to put in your report. A mistake the model was sure
     about tells you much more than a mistake it was unsure about.
     """
-    raise NotImplementedError("Problem 5: fill in worst_examples")
+    y = np.asarray(y)
+    logits = predict_logits(model, X)
+
+    # Confidence is a softmax probability, so turn the raw outputs into
+    # probabilities. Subtracting the biggest number in each row first changes
+    # nothing mathematically but keeps exp() from overflowing.
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    probabilities = np.exp(shifted) / np.exp(shifted).sum(axis=1, keepdims=True)
+
+    predicted = logits.argmax(axis=1)
+    # Only the rows the model got wrong, with how sure it was of its answer.
+    wrong = np.flatnonzero(predicted != y)
+    confidence = probabilities[wrong, predicted[wrong]]
+
+    # argsort puts the smallest first, so sort by the negative: the most
+    # confident mistake comes first. "stable" keeps ties in file order.
+    order = wrong[np.argsort(-confidence, kind="stable")]
+
+    return [
+        {
+            "path": paths[row],
+            "true": int(y[row]),
+            "predicted": int(predicted[row]),
+            "confidence": float(probabilities[row, predicted[row]]),
+        }
+        for row in order[:k]
+    ]
 
 
 # ---------------------------------------------------------------------------
